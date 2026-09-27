@@ -59,6 +59,7 @@ from nemo_rl.models.generation.vllm.vllm_worker_async import (
     VllmAsyncGenerationWorkerImpl,
 )
 from nemo_rl.utils.timer import TimeoutChecker, Timer
+from nemo_rl.utils.logger import LoggerConfig
 
 
 class FakeWeightSynchronizer:
@@ -131,7 +132,7 @@ def _grpo_master_config(tmp_path) -> MasterConfig:
             min_groups_for_streaming_train=1,
             max_buffered_rollouts=4,
         ),
-        logger={},
+        logger=LoggerConfig.model_construct(),
         env={},
         checkpointing=_checkpointing_config(tmp_path),
     )
@@ -404,7 +405,7 @@ def test_logs_hyperparameters_and_concrete_weight_synchronizer(
             min_groups_for_streaming_train=1,
             max_buffered_rollouts=4,
         ),
-        logger={},
+        logger=LoggerConfig.model_construct(),
         env={},
         # __init__ builds a CheckpointManager + TimeoutChecker from this block.
         checkpointing=_checkpointing_config(tmp_path),
@@ -471,7 +472,7 @@ def test_reference_logprobs_required_only_when_kl_enabled(
             min_groups_for_streaming_train=1,
             max_buffered_rollouts=4,
         ),
-        logger={},
+        logger=LoggerConfig.model_construct(),
         env={},
         checkpointing=_checkpointing_config(tmp_path),
     )
@@ -530,7 +531,7 @@ def test_logs_setup_timing_metrics(monkeypatch, tmp_path) -> None:
             min_groups_for_streaming_train=1,
             max_buffered_rollouts=4,
         ),
-        logger={},
+        logger=LoggerConfig.model_construct(),
         env={},
         # __init__ builds a CheckpointManager + TimeoutChecker from this block.
         checkpointing=_checkpointing_config(tmp_path),
