@@ -33,8 +33,8 @@ supported by this transport.
 ## Start an external service
 
 Allocate serving GPUs separately from the training Ray cluster. Use vLLM
-0.29.0 for the prefix/capture plugin; it is version-pinned because it wraps
-internal renderer and serving APIs. The training environment retains the
+0.29.0, 0.30.0, or 0.31.0 for the prefix/capture plugin; it is version-pinned
+because it wraps internal renderer and serving APIs. The training environment retains the
 repository's own backend dependency pins.
 
 For a two-GPU local smoke, start serving on GPU 1 in the external vLLM
@@ -118,6 +118,50 @@ The plugin fetches staged prefixes when needed, preserves exact engine input
 tokens, and waits for a staging acknowledgement before returning commit
 coordinates to Gym. The existing finalizer verifies and assembles the staged
 records. Capture uses non-streaming chat completion responses.
+
+## vLLM 0.31 serving for Nemotron 3.5 Super
+
+The plugin also loads on vLLM 0.31.0, including local builds such as
+`0.31.0+precompiled`. The following serving setup was validated for Nemotron
+3.5 Super RL rollouts on GB300. Each node runs one aggregated TP4 engine, the
+engines sit behind a router, and P/D is not used:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_SSM_CONV_STATE_LAYOUT=DS VLLM_SERVER_DEV_MODE=1 \
+VLLM_PLUGINS=nemo_rl_prefix_api vllm serve <checkpoint> \
+  --served-model-name policy --trust-remote-code --skip-mm-profiling \
+  --tensor-parallel-size 4 --enable-expert-parallel \
+  --max-model-len 262144 --gpu-memory-utilization 0.85 \
+  --enable-prefix-caching --enable-chunked-prefill --max-num-batched-tokens 33920 \
+  --max-num-seqs 1024 --block-size 128 --no-disable-hybrid-kv-cache-manager \
+  --kv-cache-dtype auto --mamba-ssm-cache-dtype float32 --mamba-cache-mode align \
+  --mamba-backend flashinfer --enable-mamba-shared-prefix-checkpoint \
+  --use-replayssm --replayssm-buffer-len 16 --prefix-match-unit 128 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,72,96,144,192,240,288,336,384,480,576,672,768,864,960,1056,1152,1248,1344,1440,1536,1728,1920,2112,2304,2496,2688,2880,3072,3456,3840,4224,4608,4992,5376,5760,6144]}' \
+  --max-cudagraph-capture-size 6144 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser nemotron_v3
+```
+
+The `--use-replayssm`, `--enable-mamba-shared-prefix-checkpoint`, and
+`--mamba-backend` flags come from the Nemotron 3.5 serving build of vLLM
+0.31.0, not from stock 0.31.0.
+
+Known pitfalls:
+
+- Do not pass `--attention-backend` or `--moe-backend`. On GB300, adding
+  `FLASHINFER` and `flashinfer_cutlass` made every MTP draft get rejected, and
+  requests did not finish. vLLM's defaults work.
+- Use float32 Mamba SSM state and bf16 KV (`auto`) for training rollouts.
+  float16 state with stochastic rounding and fp8 KV both raised the share of
+  sequences masked for generation/training logprob mismatch.
+- Serve with the Python frontend (`VLLM_USE_RUST_FRONTEND` unset), because
+  the Rust frontend does not load Python endpoint plugins.
+- Keep `--api-server-count 1` with this plugin. The controller configures
+  capture with one HTTP call, which reaches only one API server process.
+- MTP decode CUDA graphs need capture sizes that are multiples of
+  `1 + num_speculative_tokens`. With a 1536-token maximum, an engine running
+  more than 256 sequences falls back to eager decode.
 
 ## Functional tests
 

@@ -56,7 +56,7 @@ def build_wheel(output_dir: Path) -> Path:
         f"Version: {VERSION}\n"
         "Summary: NeMo RL prefix-token and external-staging support for vLLM\n"
         "Requires-Python: >=3.10\n"
-        "Requires-Dist: vllm==0.29.0\n"
+        "Requires-Dist: vllm>=0.29.0,<0.32\n"
         "\n"
     ).encode()
     files[f"{DIST_INFO}/WHEEL"] = (

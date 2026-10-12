@@ -29,6 +29,7 @@ core_utils_spec.loader.exec_module(core_utils)
 core_replace_prefix_tokens = core_utils.replace_prefix_tokens
 
 from nemo_rl_vllm_prefix_plugin.capture_runtime import CaptureRuntime  # noqa: E402
+from nemo_rl_vllm_prefix_plugin.compat import is_supported_vllm_version  # noqa: E402
 from nemo_rl_vllm_prefix_plugin.prefix import (  # noqa: E402
     replace_prefix_tokens as plugin_replace_prefix_tokens,
 )
@@ -252,10 +253,25 @@ async def test_renderer_patch_resolves_ng_capture_and_records_engine_prompt():
     ]
 
 
+@pytest.mark.parametrize(
+    ("installed", "supported"),
+    [
+        ("0.29.0", True),
+        ("0.30.0", True),
+        ("0.31.0", True),
+        ("0.31.0+precompiled", True),
+        ("0.28.2", False),
+        ("0.32.0", False),
+    ],
+)
+def test_plugin_vllm_version_gate(installed, supported):
+    assert is_supported_vllm_version(installed) is supported
+
+
 def test_plugin_metadata_registers_vllm_endpoint_plugin():
     metadata = tomllib.loads((PLUGIN_ROOT / "pyproject.toml").read_text())
 
-    assert metadata["project"]["dependencies"] == ["vllm==0.29.0"]
+    assert metadata["project"]["dependencies"] == ["vllm>=0.29.0,<0.32"]
     assert metadata["project"]["version"] == "0.2.0"
     assert metadata["project"]["entry-points"]["vllm.endpoint_plugins"] == {
         "nemo_rl_prefix_api": (
