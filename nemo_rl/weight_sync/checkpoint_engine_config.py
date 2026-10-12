@@ -18,18 +18,23 @@ from nemo_rl.models.generation.interfaces import (
     CheckpointEngineConfig,
     GenerationConfig,
 )
-from nemo_rl.models.generation.vllm.config import (
-    VLLM_SPARSE_REFIT_TRANSPORTS,
-    VllmCheckpointEnginePluginConfig,
-    VllmConfig,
-    normalize_vllm_refit_config,
-)
 
 
 def checkpoint_engine_refit_config(
     generation_config: GenerationConfig,
 ) -> CheckpointEngineConfig | None:
     """Translate a checkpoint-engine refit scope into the internal schema."""
+    # Imported here, not at module level: nemo_rl.models.generation.vllm.config
+    # imports nemo_rl.weight_sync.hf_checkpoint_config, whose package __init__
+    # imports this module through the factory, so a module-level import is a
+    # cycle whenever the vLLM config is imported before nemo_rl.weight_sync.
+    from nemo_rl.models.generation.vllm.config import (
+        VLLM_SPARSE_REFIT_TRANSPORTS,
+        VllmCheckpointEnginePluginConfig,
+        VllmConfig,
+        normalize_vllm_refit_config,
+    )
+
     config = cast(VllmConfig, generation_config)
     transport = config.get("refit_transport")
     refit_config = normalize_vllm_refit_config(config)
