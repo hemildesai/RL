@@ -30,24 +30,23 @@ def preflight_remote_vllm_service(
 
     The check is deliberately non-mutating. ``/server_info`` only exists when
     ``VLLM_SERVER_DEV_MODE=1``, which is also what exposes ``/collective_rpc``.
+    With ``control_urls`` the data endpoint (``base_url``, typically a router)
+    must be healthy and serve the model, and every listed engine must pass the
+    full single-engine check.
     """
-    client = RemoteVllmClient(config)
-    health = client.health(timeout_s=config.connect_timeout_s)
-    # The existing external-vLLM launcher puts a small load balancer in front
-    # of each pool. Its /health response exposes the backend count. A normal
-    # request proxy cannot make /collective_rpc global across independent
-    # engine deployments, so fail before training rather than silently refit
-    # only one replica. Native vLLM TP/PP/DP workers remain one backend here.
-    if health is not None and isinstance(health.get("total_backends"), int):
-        total_backends = health["total_backends"]
-        if total_backends != 1:
-            raise RuntimeError(
-                "External vLLM refit requires exactly one engine deployment "
-                "behind the configured URL; the load balancer reports "
-                f"{total_backends} independent backends. Add control-plane "
-                "fan-out before using multiple replicas."
-            )
+    if config.control_urls:
+        router = RemoteVllmClient(config)
+        router.health(timeout_s=config.connect_timeout_s)
+        _check_served_model(router, config)
+        infos = [
+            _preflight_engine(RemoteVllmClient(config, url), config)
+            for url in config.control_urls
+        ]
+        return infos[0].model_copy(update={"num_engines": len(infos)})
+    return _preflight_engine(RemoteVllmClient(config), config)
 
+
+def _check_served_model(client: RemoteVllmClient, config: RemoteVllmServiceConfig) -> None:
     models = client.get_json(config.models_path, timeout_s=config.connect_timeout_s)
     model_entries = models.get("data")
     if not isinstance(model_entries, list):
@@ -60,8 +59,32 @@ def preflight_remote_vllm_service(
     if config.served_model_name not in model_ids:
         raise RuntimeError(
             "External vLLM model mismatch: controller expects "
-            f"{config.served_model_name!r}, service reports {sorted(model_ids)!r}"
+            f"{config.served_model_name!r}, {client.target_url} reports "
+            f"{sorted(model_ids)!r}"
         )
+
+
+def _preflight_engine(
+    client: RemoteVllmClient, config: RemoteVllmServiceConfig
+) -> RemoteVllmServiceInfo:
+    health = client.health(timeout_s=config.connect_timeout_s)
+    # The existing external-vLLM launcher puts a small load balancer in front
+    # of each pool. Its /health response exposes the backend count. A normal
+    # request proxy cannot make /collective_rpc global across independent
+    # engine deployments, so fail before training rather than silently refit
+    # only one replica. Native vLLM TP/PP/DP workers remain one backend here.
+    if health is not None and isinstance(health.get("total_backends"), int):
+        total_backends = health["total_backends"]
+        if total_backends != 1:
+            raise RuntimeError(
+                "External vLLM refit requires exactly one engine deployment "
+                f"behind {client.target_url}; the load balancer reports "
+                f"{total_backends} independent backends. Add control-plane "
+                "fan-out before using multiple replicas: list each engine in "
+                "remote_vllm_cfg.control_urls."
+            )
+
+    _check_served_model(client, config)
 
     raw_server_info: Any = client.get_json(
         config.server_info_path, timeout_s=config.connect_timeout_s

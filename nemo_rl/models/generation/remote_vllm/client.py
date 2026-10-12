@@ -19,6 +19,8 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -32,10 +34,17 @@ def service_url(base_url: str, absolute_path: str) -> str:
 
 
 class RemoteVllmClient:
-    """Synchronous control client used only on setup/refit paths."""
+    """Synchronous control client used only on setup/refit paths.
 
-    def __init__(self, config: RemoteVllmServiceConfig) -> None:
+    ``target_url`` selects the engine to address; it defaults to
+    ``config.base_url``.
+    """
+
+    def __init__(
+        self, config: RemoteVllmServiceConfig, target_url: str | None = None
+    ) -> None:
         self.config = config
+        self.target_url = target_url or config.base_url
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -60,7 +69,7 @@ class RemoteVllmClient:
         body: dict[str, Any] | None = None,
         timeout_s: float | None = None,
     ) -> bytes:
-        url = service_url(self.config.base_url, path)
+        url = service_url(self.target_url, path)
         if query:
             url = f"{url}?{urllib.parse.urlencode(query)}"
         headers = self._headers()
@@ -94,12 +103,12 @@ class RemoteVllmClient:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RuntimeError(
                 f"External vLLM returned invalid JSON from "
-                f"{service_url(self.config.base_url, path)}"
+                f"{service_url(self.target_url, path)}"
             ) from error
         if not isinstance(decoded, dict):
             raise RuntimeError(
                 f"External vLLM returned a non-object from "
-                f"{service_url(self.config.base_url, path)}"
+                f"{service_url(self.target_url, path)}"
             )
         return decoded
 
@@ -148,4 +157,57 @@ class RemoteVllmClient:
             "POST",
             "/v1/nemo-rl/token-capture/configure",
             body={"bridge_url": bridge_url, "auth_token": auth_token},
+        )
+
+
+class RemoteVllmFleetClient:
+    """Apply each control call to every engine in ``config.engine_control_urls``.
+
+    Calls run concurrently, one thread per engine, and every engine is attempted
+    even when another fails, so a partial pause or resume is reported rather
+    than hidden. Any failure raises after all calls finish, naming the engines
+    that failed.
+    """
+
+    def __init__(self, config: RemoteVllmServiceConfig) -> None:
+        self.config = config
+        self.clients = [
+            RemoteVllmClient(config, url) for url in config.engine_control_urls
+        ]
+
+    def _fanout(self, action: str, call: Callable[[RemoteVllmClient], None]) -> None:
+        if len(self.clients) == 1:
+            call(self.clients[0])
+            return
+        failures: list[str] = []
+        with ThreadPoolExecutor(max_workers=len(self.clients)) as pool:
+            futures = {pool.submit(call, client): client for client in self.clients}
+            for future, client in futures.items():
+                error = future.exception()
+                if error is not None:
+                    failures.append(f"{client.target_url}: {error}")
+        if failures:
+            raise RuntimeError(
+                f"External vLLM {action} failed on {len(failures)} of "
+                f"{len(self.clients)} engines: " + "; ".join(failures)
+            )
+
+    def pause(self, *, mode: str, clear_cache: bool) -> None:
+        self._fanout("pause", lambda c: c.pause(mode=mode, clear_cache=clear_cache))
+
+    def reload_weights(self, weights_path: str) -> None:
+        self._fanout("weight reload", lambda c: c.reload_weights(weights_path))
+
+    def reset_prefix_cache(self) -> None:
+        self._fanout("prefix-cache reset", lambda c: c.reset_prefix_cache())
+
+    def resume(self) -> None:
+        self._fanout("resume", lambda c: c.resume())
+
+    def configure_token_capture(self, *, bridge_url: str, auth_token: str) -> None:
+        self._fanout(
+            "token-capture configuration",
+            lambda c: c.configure_token_capture(
+                bridge_url=bridge_url, auth_token=auth_token
+            ),
         )

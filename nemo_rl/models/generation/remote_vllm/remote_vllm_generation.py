@@ -25,7 +25,7 @@ from nemo_rl.models.generation.interfaces import (
     GenerationInterface,
     GenerationOutputSpec,
 )
-from nemo_rl.models.generation.remote_vllm.client import RemoteVllmClient
+from nemo_rl.models.generation.remote_vllm.client import RemoteVllmFleetClient
 from nemo_rl.models.generation.remote_vllm.config import RemoteVllmServiceConfig
 from nemo_rl.models.generation.remote_vllm.preflight import (
     preflight_remote_vllm_service,
@@ -70,7 +70,9 @@ class RemoteVllmGeneration(GenerationInterface):
         self.remote_config = RemoteVllmServiceConfig.model_validate(
             config["remote_vllm_cfg"]
         )
-        self.client = RemoteVllmClient(self.remote_config)
+        # Control calls go to every engine deployment (one unless control_urls
+        # lists several behind a router); rollout traffic goes to base_url.
+        self.client = RemoteVllmFleetClient(self.remote_config)
         self.dp_openai_server_base_urls: list[str] = [self.remote_config.base_url]
         self.weight_synchronizer = None
         self._paused_for_refit = False

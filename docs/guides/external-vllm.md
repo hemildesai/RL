@@ -51,8 +51,9 @@ Development control endpoints must be reachable by the controller on a private
 network. Setup checks health, the served model alias, and `/server_info`.
 Refit uses `/pause`, `/collective_rpc` with `reload_weights(weights_path=...)`,
 and `/resume`. This example supports one engine deployment, including its
-native TP/PP/DP workers. Independent replicas, P/D disaggregation, and router
-control fan-out are outside this stack.
+native TP/PP/DP workers, or several independent engines behind a router (see
+[Multiple engine deployments behind a router](#multiple-engine-deployments-behind-a-router)).
+P/D disaggregation is outside this stack.
 
 Prepare Gym's workplace-assistant data using the existing
 [Gym setup instructions](https://docs.nvidia.com/nemo/gym/0.1.0/tutorials/nemo-rl-grpo/setup.html#training-nemo-rl-grpo-setup).
@@ -118,6 +119,34 @@ The plugin fetches staged prefixes when needed, preserves exact engine input
 tokens, and waits for a staging acknowledgement before returning commit
 coordinates to Gym. The existing finalizer verifies and assembles the staged
 records. Capture uses non-streaming chat completion responses.
+
+## Multiple engine deployments behind a router
+
+A single engine deployment, including one with native TP/PP/DP workers, owns
+all of its workers. Refit therefore needs one pause, one weight reload, and one
+resume. For several independent engines, put a router such as vllm-router in
+front of them for rollout traffic, and list every engine in `control_urls`:
+
+```yaml
+policy:
+  generation:
+    remote_vllm_cfg:
+      base_url: http://router-host:9210/v1      # NeMo-Gym traffic
+      control_urls:                             # one per engine deployment
+        - http://engine-0:8000
+        - http://engine-1:8000
+        - http://engine-2:8000
+        - http://engine-3:8000
+```
+
+Setup checks that the router is healthy and serves the model. Each engine then
+gets the full single-engine preflight. Refit pause, weight reload,
+prefix-cache reset, resume, and token-capture configuration run on every engine
+concurrently. If any engine fails, the step fails and the error names the
+failed engines. The other engines are still attempted, so a partial pause or
+resume is reported rather than hidden. Without `control_urls`, `base_url` must
+be one engine deployment. Preflight rejects a load balancer whose `/health`
+reports more than one backend.
 
 ## vLLM 0.31 serving for Nemotron 3.5 Super
 

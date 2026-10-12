@@ -14,7 +14,10 @@
 
 """Controller-side adapter for an externally managed stock vLLM server."""
 
-from nemo_rl.models.generation.remote_vllm.client import RemoteVllmClient
+from nemo_rl.models.generation.remote_vllm.client import (
+    RemoteVllmClient,
+    RemoteVllmFleetClient,
+)
 from nemo_rl.models.generation.remote_vllm.config import (
     RemoteVllmRefitConfig,
     RemoteVllmServiceConfig,
@@ -30,6 +33,7 @@ from nemo_rl.models.generation.remote_vllm.remote_vllm_generation import (
 __all__ = [
     "RemoteVllmRefitConfig",
     "RemoteVllmClient",
+    "RemoteVllmFleetClient",
     "RemoteVllmServiceConfig",
     "RemoteVllmServiceInfo",
     "RemoteVllmGeneration",

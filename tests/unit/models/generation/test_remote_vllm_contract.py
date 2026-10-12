@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import threading
 from ray import cloudpickle
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -25,6 +26,7 @@ from pydantic import ValidationError
 
 from nemo_rl.models.generation.remote_vllm import (
     RemoteVllmClient,
+    RemoteVllmFleetClient,
     RemoteVllmGeneration,
     RemoteVllmServiceConfig,
     preflight_remote_vllm_service,
@@ -251,3 +253,150 @@ def test_generation_serializes_bridge_coordinates_not_live_server(
     )
     assert requests[0].headers["Authorization"] == "Bearer secret"
     assert json.loads(requests[0].data or b"") == {"weight_version": 7}
+
+
+_ENGINES = ["http://engine-0.test:8000", "http://engine-1.test:8000"]
+
+
+def test_remote_service_config_validates_control_urls() -> None:
+    assert _config().engine_control_urls == ["http://rollout.test:9210/v1"]
+    assert _config(control_urls=_ENGINES).engine_control_urls == _ENGINES
+    with pytest.raises(ValidationError, match="control_urls must start"):
+        _config(control_urls=["engine-0.test:8000"])
+    with pytest.raises(ValidationError, match="duplicates"):
+        _config(control_urls=[_ENGINES[0], _ENGINES[0]])
+
+
+def test_preflight_checks_router_data_path_and_every_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: list[str] = []
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        requested_urls.append(request.full_url)
+        if request.full_url.endswith("/health"):
+            # A router over several engines reports them; each engine reports none.
+            if request.full_url.startswith("http://rollout.test"):
+                return _Response({"total_backends": 2})
+            return _Response()
+        if request.full_url.endswith("/v1/models"):
+            return _Response({"data": [{"id": "policy"}]})
+        return _Response({"model_config": {"max_model_len": 4096}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    info = preflight_remote_vllm_service(_config(control_urls=_ENGINES))
+
+    assert info.num_engines == 2
+    assert requested_urls == [
+        "http://rollout.test:9210/health",
+        "http://rollout.test:9210/v1/models",
+        "http://engine-0.test:8000/health",
+        "http://engine-0.test:8000/v1/models",
+        "http://engine-0.test:8000/server_info",
+        "http://engine-1.test:8000/health",
+        "http://engine-1.test:8000/v1/models",
+        "http://engine-1.test:8000/server_info",
+    ]
+
+
+def test_preflight_rejects_control_url_that_is_itself_a_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        if request.full_url == "http://engine-1.test:8000/health":
+            return _Response({"total_backends": 3})
+        if request.full_url.endswith("/v1/models"):
+            return _Response({"data": [{"id": "policy"}]})
+        if request.full_url.endswith("/server_info"):
+            return _Response({"model_config": {"max_model_len": 4096}})
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(RuntimeError, match="engine-1.test:8000"):
+        preflight_remote_vllm_service(_config(control_urls=_ENGINES))
+
+
+def test_fleet_client_fans_refit_out_to_every_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+    lock = threading.Lock()
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        with lock:
+            requested.append(request.full_url)
+        return _Response({"status": "ok"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    fleet = RemoteVllmFleetClient(_config(control_urls=_ENGINES))
+
+    fleet.pause(mode="keep", clear_cache=True)
+    fleet.reload_weights("/shared/hf-exports/version_00000002")
+    fleet.reset_prefix_cache()
+    fleet.resume()
+    fleet.configure_token_capture(bridge_url="http://10.0.0.1:1", auth_token="t")
+
+    for engine in _ENGINES:
+        assert sorted(url for url in requested if url.startswith(engine)) == sorted(
+            [
+                f"{engine}/pause?mode=keep&clear_cache=true",
+                f"{engine}/collective_rpc",
+                f"{engine}/reset_prefix_cache",
+                f"{engine}/resume",
+                f"{engine}/v1/nemo-rl/token-capture/configure",
+            ]
+        )
+    assert not any(url.startswith("http://rollout.test") for url in requested)
+
+
+def test_fleet_client_attempts_every_engine_and_names_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+    lock = threading.Lock()
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        with lock:
+            requested.append(request.full_url)
+        if request.full_url.startswith(_ENGINES[0]):
+            raise urllib.error.URLError("connection refused")
+        return _Response({"status": "ok"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    fleet = RemoteVllmFleetClient(_config(control_urls=_ENGINES))
+
+    with pytest.raises(RuntimeError, match=r"resume failed on 1 of 2 engines.*engine-0"):
+        fleet.resume()
+    assert f"{_ENGINES[1]}/resume" in requested
+
+
+def test_generation_refits_every_engine_but_serves_through_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    requested: list[str] = []
+    lock = threading.Lock()
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        with lock:
+            requested.append(request.full_url)
+        return _Response({"status": "ok"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    generation = RemoteVllmGeneration(
+        {
+            "remote_vllm_cfg": _config(control_urls=_ENGINES).model_dump(),
+            "refit_transport": "hf_checkpoint",
+            "refit_cfg": {"hf_checkpoint": {"checkpoint_dir": str(tmp_path)}},
+        }
+    )
+
+    assert generation.dp_openai_server_base_urls == ["http://rollout.test:9210/v1"]
+    generation.pause_generation_for_refit(clear_cache=True)
+    generation.reload_weights("/shared/hf-exports/version_00000003")
+    generation.resume_generation_after_refit()
+
+    for engine in _ENGINES:
+        assert f"{engine}/collective_rpc" in requested
+        assert f"{engine}/resume" in requested
