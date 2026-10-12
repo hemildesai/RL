@@ -7,6 +7,7 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 import copy
+import os
 import importlib.util
 import sys
 import tomllib
@@ -382,3 +383,40 @@ def test_capture_runtime_reuses_pd_prefill_prompt_as_prefix():
         admission,
         prefill_prompt_token_ids=[10, 11, 12, 20, 21],
     ) == [10, 11, 12]
+
+
+def test_capture_runtime_shares_bridge_config_across_api_servers(tmp_path, monkeypatch):
+    shared = tmp_path / "capture.json"
+    monkeypatch.setenv("NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG", str(shared))
+    configured = CaptureRuntime()
+    other = CaptureRuntime()
+    assert other.capability() == {"token_capture_configured": False}
+
+    configured.configure(bridge_url="http://bridge-a:1", auth_token="secret-a")
+
+    assert shared.stat().st_mode & 0o777 == 0o600
+    assert other.capability() == {"token_capture_configured": True}
+    assert other._require_bridge()._base_url == configured._require_bridge()._base_url
+
+
+def test_capture_runtime_reloads_shared_config_when_rewritten(tmp_path, monkeypatch):
+    shared = tmp_path / "capture.json"
+    monkeypatch.setenv("NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG", str(shared))
+    first, other = CaptureRuntime(), CaptureRuntime()
+    first.configure(bridge_url="http://bridge-a:1", auth_token="secret-a")
+    old_url = other._require_bridge()._base_url
+
+    first.configure(bridge_url="http://bridge-b:2", auth_token="secret-b")
+    st = shared.stat()
+    os.utime(shared, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    assert other._require_bridge()._base_url != old_url
+    assert "bridge-b" in other._require_bridge()._base_url
+
+
+def test_capture_runtime_without_shared_config_stays_process_local(monkeypatch):
+    monkeypatch.delenv("NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG", raising=False)
+    configured, other = CaptureRuntime(), CaptureRuntime()
+    configured.configure(bridge_url="http://bridge-a:1", auth_token="secret-a")
+
+    assert other.capability() == {"token_capture_configured": False}

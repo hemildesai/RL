@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -98,21 +99,73 @@ class _PendingCapture:
     prompt_token_ids: list[int]
 
 
+SHARED_CONFIG_ENV = "NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG"
+
+
 class CaptureRuntime:
-    """Resolve staged prefixes and commit completed non-streaming requests."""
+    """Resolve staged prefixes and commit completed non-streaming requests.
+
+    With ``vllm serve --api-server-count N`` the API-server processes share one
+    port, so the controller's single configure call reaches only one of them.
+    When ``NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG`` names a node-local file (one per
+    engine), the configured process writes the bridge settings there and the
+    other processes load them on demand, re-reading the file when it changes.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._bridge: CaptureBridgeClient | None = None
         self._pending: dict[int, _PendingCapture] = {}
+        self._shared_mtime_ns = 0
 
     def configure(self, *, bridge_url: str, auth_token: str) -> None:
         """Replace the staging bridge used for subsequent requests."""
         bridge = CaptureBridgeClient(base_url=bridge_url, auth_token=auth_token)
         with self._lock:
             self._bridge = bridge
+        self._write_shared_config(bridge_url, auth_token)
+
+    @staticmethod
+    def _shared_config_path() -> str | None:
+        return os.environ.get(SHARED_CONFIG_ENV) or None
+
+    def _write_shared_config(self, bridge_url: str, auth_token: str) -> None:
+        path = self._shared_config_path()
+        if path is None:
+            return
+        tmp = f"{path}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"bridge_url": bridge_url, "auth_token": auth_token}, fh)
+        os.replace(tmp, path)
+        with self._lock:
+            self._shared_mtime_ns = os.stat(path).st_mtime_ns
+
+    def _maybe_load_shared_config(self) -> None:
+        path = self._shared_config_path()
+        if path is None:
+            return
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            return
+        with self._lock:
+            if self._bridge is not None and mtime_ns <= self._shared_mtime_ns:
+                return
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            bridge = CaptureBridgeClient(
+                base_url=data["bridge_url"], auth_token=data["auth_token"]
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        with self._lock:
+            self._bridge = bridge
+            self._shared_mtime_ns = mtime_ns
 
     def _require_bridge(self) -> CaptureBridgeClient:
+        self._maybe_load_shared_config()
         with self._lock:
             bridge = self._bridge
         if bridge is None:
@@ -237,5 +290,6 @@ class CaptureRuntime:
 
     def capability(self) -> dict[str, Any]:
         """Return whether a controller bridge is currently configured."""
+        self._maybe_load_shared_config()
         with self._lock:
             return {"token_capture_configured": self._bridge is not None}

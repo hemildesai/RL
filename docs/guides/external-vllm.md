@@ -157,8 +157,14 @@ Known pitfalls:
   sequences masked for generation/training logprob mismatch.
 - Serve with the Python frontend (`VLLM_USE_RUST_FRONTEND` unset), because
   the Rust frontend does not load Python endpoint plugins.
-- Keep `--api-server-count 1` with this plugin. The controller configures
-  capture with one HTTP call, which reaches only one API server process.
+- With `--api-server-count N` (N > 1), set
+  `NEMO_RL_TOKEN_CAPTURE_SHARED_CONFIG` to a node-local path that is unique
+  per engine, for example
+  `/dev/shm/nrl-token-capture-${SLURM_JOB_ID}-<engine>.json`. The
+  controller configures capture with one HTTP call, which reaches one API
+  server process. That process writes the bridge settings to this file
+  (mode 0600), and the other processes load them from it. Without the
+  variable, use one API server.
 - MTP decode CUDA graphs need capture sizes that are multiples of
   `1 + num_speculative_tokens`. With a 1536-token maximum, an engine running
   more than 256 sequences falls back to eager decode.
