@@ -25,6 +25,7 @@ from nemo_rl.models.generation.remote_vllm import (
     RemoteVllmClient,
     RemoteVllmGeneration,
     RemoteVllmServiceConfig,
+    preflight_remote_vllm_service,
 )
 from nemo_rl.weight_sync import remote_vllm_nccl_weight_synchronizer as sync_mod
 from nemo_rl.weight_sync.factory import create_weight_synchronizer
@@ -126,6 +127,21 @@ def test_weight_transfer_requests_match_vllm_schema(
         ),
         (f"{origin}/finish_weight_update", {"weight_version": "3"}, 60),
     ]
+
+
+def test_preflight_accepts_multiple_backends_only_with_control_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        if request.full_url.endswith("/health"):
+            return _Response({"total_backends": 4, "control_fanout": True})
+        if request.full_url.endswith("/v1/models"):
+            return _Response({"data": [{"id": "policy"}]})
+        return _Response({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    config = RemoteVllmServiceConfig.model_validate(_config_dict(transport="nccl"))
+    assert preflight_remote_vllm_service(config).model == "policy"
 
 
 class _Ref:

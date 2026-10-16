@@ -38,9 +38,11 @@ def preflight_remote_vllm_service(
     # request proxy cannot make /collective_rpc global across independent
     # engine deployments, so fail before training rather than silently refit
     # only one replica. Native vLLM TP/PP/DP workers remain one backend here.
+    # A load balancer that applies every control request to all of its
+    # backends opts in with "control_fanout": true.
     if health is not None and isinstance(health.get("total_backends"), int):
         total_backends = health["total_backends"]
-        if total_backends != 1:
+        if total_backends != 1 and health.get("control_fanout") is not True:
             raise RuntimeError(
                 "External vLLM refit requires exactly one engine deployment "
                 "behind the configured URL; the load balancer reports "
