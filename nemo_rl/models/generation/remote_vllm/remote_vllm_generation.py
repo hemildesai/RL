@@ -20,6 +20,7 @@ import ray
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.generation.interfaces import (
+    CollectiveSenderSpec,
     GenerationConfig,
     GenerationDatumSpec,
     GenerationInterface,
@@ -53,7 +54,16 @@ class RemoteVllmGeneration(GenerationInterface):
             )
         if generation["colocated"]["enabled"]:
             raise ValueError("remote_vllm generation cannot be colocated")
-        if generation.get("refit_transport") != "hf_checkpoint":
+        remote_config = RemoteVllmServiceConfig.model_validate(
+            generation["remote_vllm_cfg"]
+        )
+        if remote_config.refit.transport == "nccl":
+            if generation.get("refit_transport") is not None:
+                raise ValueError(
+                    "remote_vllm_cfg.refit.transport=nccl requires "
+                    "policy.generation.refit_transport to be unset"
+                )
+        elif generation.get("refit_transport") != "hf_checkpoint":
             raise ValueError("remote_vllm requires refit_transport=hf_checkpoint")
         if not master_config.policy.get("megatron_cfg", {}).get("enabled"):
             raise ValueError(
@@ -63,7 +73,6 @@ class RemoteVllmGeneration(GenerationInterface):
             raise NotImplementedError(
                 "remote_vllm does not yet support Single Controller token capture"
             )
-        RemoteVllmServiceConfig.model_validate(generation["remote_vllm_cfg"])
 
     def __init__(self, config: GenerationConfig) -> None:
         self.cfg = config
@@ -83,7 +92,18 @@ class RemoteVllmGeneration(GenerationInterface):
         self, ip: str, port: int, world_size: int, *, train_world_size: int
     ) -> list[ray.ObjectRef]:
         del ip, port, world_size, train_world_size
-        raise NotImplementedError("remote_vllm refit uses an HF checkpoint, not NCCL")
+        raise NotImplementedError(
+            "remote_vllm builds its NCCL group in RemoteVllmNcclWeightSynchronizer"
+        )
+
+    def get_collective_sender_spec(self) -> CollectiveSenderSpec:
+        """VLLM's NCCL peer protocol and the packed geometry both sides use."""
+        refit = self.remote_config.refit
+        return CollectiveSenderSpec(
+            nccl_peer="vllm",
+            buffer_size_bytes=refit.nccl_packed_buffer_size_bytes,
+            num_buffers=refit.nccl_packed_num_buffers,
+        )
 
     def generate(
         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool

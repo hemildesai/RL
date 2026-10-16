@@ -136,6 +136,51 @@ class RemoteVllmClient:
             timeout_s=self.config.refit.timeout_s,
         )
 
+    # vLLM native weight transfer (--weight-transfer-config); refit.transport=nccl.
+
+    def init_weight_transfer_engine(
+        self, init_info: dict[str, Any], *, engine_world_size: int
+    ) -> None:
+        """Join the vLLM ranks to the trainer's NCCL group (blocks until all join).
+
+        ``nemo_rl_engine_world_size`` is ignored by vLLM; a fan-out endpoint
+        uses it to give each server its own ``init_info.rank_offset``.
+        """
+        self.request(
+            "POST",
+            "/init_weight_transfer_engine",
+            body={
+                "init_info": init_info,
+                "nemo_rl_engine_world_size": engine_world_size,
+            },
+            timeout_s=self.config.refit.timeout_s,
+        )
+
+    def start_weight_update(self) -> None:
+        self.request(
+            "POST",
+            "/start_weight_update",
+            body={},
+            timeout_s=self.config.refit.timeout_s,
+        )
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Receive one full weight broadcast; returns once it has been loaded."""
+        self.request(
+            "POST",
+            "/update_weights",
+            body={"update_info": update_info},
+            timeout_s=self.config.refit.timeout_s,
+        )
+
+    def finish_weight_update(self, weight_version: str) -> None:
+        self.request(
+            "POST",
+            "/finish_weight_update",
+            body={"weight_version": weight_version},
+            timeout_s=self.config.refit.timeout_s,
+        )
+
     def reset_prefix_cache(self) -> None:
         self.request("POST", self.config.reset_prefix_cache_path)
 

@@ -20,6 +20,7 @@ topology (colocated vs. non-colocated) and the generation backend:
 - Megatron -> Megatron reshard synchronizer
 - vLLM colocated -> IPC (ZMQ + CUDA IPC handles)
 - vLLM non-colocated -> NCCL collective
+- external vLLM -> HF checkpoint reload, or vLLM's NCCL weight-transfer engine
 - SGLang colocated -> Ray CUDA-IPC bucket transfer
 - SGLang non-colocated -> NCCL broadcast over SGLang's own weight-update group
 """
@@ -117,7 +118,20 @@ def create_weight_synchronizer(
         return HfCheckpointWeightSynchronizer(policy, generation, config.hf_checkpoint)
 
     if generation_backend == REMOTE_VLLM_BACKEND:
-        raise ValueError("remote_vllm requires refit_transport=hf_checkpoint")
+        if generation.remote_config.refit.transport != "nccl":
+            raise ValueError("remote_vllm requires refit_transport=hf_checkpoint")
+        if colocated or train_cluster is None:
+            raise ValueError(
+                "remote_vllm NCCL refit requires non-colocated generation and "
+                "train_cluster"
+            )
+        from nemo_rl.weight_sync.remote_vllm_nccl_weight_synchronizer import (
+            RemoteVllmNcclWeightSynchronizer,
+        )
+
+        return RemoteVllmNcclWeightSynchronizer(
+            policy, generation, train_cluster, refit_timeout_s=refit_timeout_s
+        )
 
     # Megatron owns its refit selectors (including "mcore"); the vLLM-oriented
     # checkpoint-engine normalization rejects that valid Megatron value.
